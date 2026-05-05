@@ -281,13 +281,12 @@ const LangToggle = ({ lang, setLang }) => (
 
 // ─── SCREEN 1 — PROJECTS LIST ─────────────────────────────────────────────────
 
-function S1_Projects({ onSelect, tr, lang }) {
+function S1_Projects({ onSelect, tr, lang, projects }) {
   const [filter, setFilter] = useState("all");
   const SC = STATUS_CFG(tr);
-  const visible = filter === "all" ? PROJECTS : PROJECTS.filter(p => p.status === filter);
-  const totalVal = PROJECTS.reduce((s, p) => s + p.contractValue, 0);
-  const totalInv = PROJECTS.reduce((s, p) => s + pct(p.invoicedItems, p.totalItems) / 100 * p.contractValue, 0);
-
+  const visible = filter === "all" ? projects : projects.filter(p => p.status === filter);
+  const totalVal = projects.reduce((s, p) => s + (p.contract_value || p.contractValue || 0), 0);
+  const totalInv = projects.reduce((s, p) => s + pct(p.invoicedItems || 0, p.totalItems || 1) / 100 * (p.contract_value || p.contractValue || 0), 0);
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 28 }}>
@@ -299,9 +298,9 @@ function S1_Projects({ onSelect, tr, lang }) {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 24 }}>
-        {[[tr("portfolio_value"), fmt(totalVal), `${PROJECTS.length} ${tr("contracts")}`],
+        {[[tr("portfolio_value"), fmt(totalVal), `${projects.length} ${tr("contracts")}`],
           [tr("total_invoiced"), fmt(totalInv), `${Math.round(totalInv/totalVal*100)}${tr("of_portfolio")}`],
-          [tr("active_projects"), PROJECTS.filter(p=>p.status==="active").length, tr("currently_running")]
+          [tr("active_projects"), projects.filter(p=>p.status==="active").length, tr("currently_running")]
         ].map(([l,v,s],i) => (
           <Card key={i}>
             <div style={{ fontSize: 10, color: "#6B7280", fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 6 }}>{l}</div>
@@ -312,7 +311,7 @@ function S1_Projects({ onSelect, tr, lang }) {
       </div>
 
       <div style={{ display: "flex", borderBottom: "1px solid #1E2D3D", marginBottom: 20, overflowX: "auto" }}>
-        {[["all",tr("all"),PROJECTS.length],["active",tr("active"),PROJECTS.filter(p=>p.status==="active").length],["on_hold",tr("on_hold"),PROJECTS.filter(p=>p.status==="on_hold").length],["completed",tr("completed"),PROJECTS.filter(p=>p.status==="completed").length]].map(([v,l,n])=>(
+        {[["all",tr("all"),projects.length],["active",tr("active"),projects.filter(p=>p.status==="active").length],["on_hold",tr("on_hold"),projects.filter(p=>p.status==="on_hold").length],["completed",tr("completed"),projects.filter(p=>p.status==="completed").length]].map(([v,l,n])=>(
           <Tab key={v} label={l} active={filter===v} onClick={()=>setFilter(v)} n={n} />
         ))}
       </div>
@@ -817,7 +816,35 @@ export default function App() {
     supabase
       .from('projects')
       .select('*, buildings(*, units(*)), site_items(*), change_orders(*), payments(*)')
-      .then(({ data }) => { if (data && data.length > 0) setDbProjects(data); });
+      .then(({ data, error }) => {
+        if (error) { console.error('Supabase error:', error); return; }
+        if (data && data.length > 0) {
+          const normalized = data.map(p => ({
+            ...p,
+            contractValue: p.contract_value,
+            contractNum: p.contract_num,
+            gcContact: p.gc_contact,
+            gcEmail: p.gc_email,
+            startDate: p.start_date,
+            endDate: p.end_date,
+            totalItems: p.buildings?.reduce((s, b) => s + (b.units?.length || 0), 0) || 0,
+            invoicedItems: 0,
+            siteItems: (p.site_items || []).map(i => ({ ...i, labelEs: i.label_es })),
+            changeOrders: (p.change_orders || []).map(c => ({ ...c, coNum: c.co_num })),
+            payments: p.payments || [],
+            buildings: (p.buildings || []).map(b => ({
+              ...b,
+              units: (b.units || []).map(u => ({
+                ...u,
+                type: u.unit_type,
+                totalItems: 13,
+                invoicedItems: 0,
+              }))
+            }))
+          }));
+          setDbProjects(normalized);
+        }
+      });
   }, []);
 
   const activeProjects = dbProjects || PROJECTS;
@@ -869,7 +896,7 @@ export default function App() {
       )}
 
       <div style={{ padding:"20px 20px 48px", maxWidth:640, margin:"0 auto" }}>
-        {screen==="s1" && <S1_Projects onSelect={go.s2} tr={tr} lang={lang} />}
+        {screen==="s1" && <S1_Projects onSelect={go.s2} tr={tr} lang={lang} projects={activeProjects} />}
         {screen==="s2" && proj && <S2_Project project={proj} onBack={go.s1} onBuilding={go.s3} tr={tr} lang={lang} />}
         {screen==="s3" && bldg && <S3_Building building={bldg} project={proj} onBack={go.back2} onUnit={go.s4} tr={tr} lang={lang} />}
         {screen==="s4" && unit && <S4_Unit unit={unit} building={bldg} project={proj} onBack={go.back3} onCluster={go.s5} tr={tr} lang={lang} />}
