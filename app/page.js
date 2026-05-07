@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { supabase } from "@/lib/supabase";
+import NewProjectWizard from "@/app/NewProjectWizard";
 
 // ─── TRANSLATIONS ─────────────────────────────────────────────────────────────
 const T = {
@@ -281,7 +282,7 @@ const LangToggle = ({ lang, setLang }) => (
 
 // ─── SCREEN 1 — PROJECTS LIST ─────────────────────────────────────────────────
 
-function S1_Projects({ onSelect, tr, lang, projects }) {
+function S1_Projects({ onSelect, tr, lang, projects, onNewProject }) {
   const [filter, setFilter] = useState("all");
   const SC = STATUS_CFG(tr);
   const visible = filter === "all" ? projects : projects.filter(p => p.status === filter);
@@ -294,7 +295,7 @@ function S1_Projects({ onSelect, tr, lang, projects }) {
           <div style={{ fontSize: 11, letterSpacing: ".15em", color: "#F59E0B", fontWeight: 700, textTransform: "uppercase", marginBottom: 4 }}>King 23 LLC</div>
           <h1 style={{ margin: 0, fontSize: 28, fontWeight: 800, color: "#F1F5F9", letterSpacing: "-.02em" }}>{tr("nav_projects")}</h1>
         </div>
-        <button style={{ background: "#F59E0B", color: "#0A0F1E", border: "none", borderRadius: 8, padding: "10px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>{tr("new_project")}</button>
+        <button onClick={onNewProject} style={{ background: "#F59E0B", color: "#0A0F1E", border: "none", borderRadius: 8, padding: "10px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>{tr("new_project")}</button>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 24 }}>
@@ -600,9 +601,37 @@ function S3_Building({ building: b, project, onBack, onUnit, tr, lang }) {
 
 function S4_Unit({ unit: u, building: b, project, onBack, onCluster, tr, lang }) {
   const SC = STATUS_CFG(tr);
-  // Get line items for this unit (use 303 as demo, fall back to empty)
-  const allItems = UNIT_LINE_ITEMS[u.id] || UNIT_LINE_ITEMS[303] || [];
+  const [allItems, setAllItems] = useState([]);
+  const [dbGroups, setDbGroups] = useState([]);
   const up = pct(u.invoicedItems, u.totalItems);
+
+  useEffect(() => {
+    supabase
+      .from('line_item_groups')
+      .select('*, line_items(*)')
+      .eq('project_id', project.id)
+      .then(({ data, error }) => {
+        if (error) { console.error(error); return; }
+        if (data && data.length > 0) {
+          setDbGroups(data);
+          const items = data.flatMap(g =>
+            (g.line_items || []).map(item => ({
+              id: item.id,
+              groupId: g.id,
+              label: item.label,
+              labelEs: item.label_es || item.label,
+              unitPrice: item.unit_price,
+              status: 'not_started',
+              photos: 0,
+            }))
+          );
+          setAllItems(items);
+        } else {
+          const fallback = UNIT_LINE_ITEMS[u.id] || UNIT_LINE_ITEMS[303] || [];
+          setAllItems(fallback);
+        }
+      });
+  }, [u.id, project.id]);
 
   // Group items by groupId
   const clustersMap = {};
@@ -610,7 +639,10 @@ function S4_Unit({ unit: u, building: b, project, onBack, onCluster, tr, lang })
     if (!clustersMap[item.groupId]) clustersMap[item.groupId] = [];
     clustersMap[item.groupId].push(item);
   });
-  const clusters = GROUPS.filter(g => clustersMap[g.id]).map(g => ({ group: g, items: clustersMap[g.id] }));
+  const groupSource = dbGroups.length > 0
+  ? dbGroups.map(g => ({ id: g.id, name: g.name, nameEs: g.name, costCode: g.cost_code }))
+  : GROUPS;
+const clusters = groupSource.filter(g => clustersMap[g.id]).map(g => ({ group: g, items: clustersMap[g.id] }));
 
   const statusColor = (st) => ({ invoiced:"#3B82F6", approved:"#10B981", pending_review:"#F59E0B", not_started:"#374151" })[st] || "#374151";
 
@@ -810,6 +842,7 @@ export default function App() {
   const [cluster, setCluster] = useState(null);
   const [lineItem, setLineItem] = useState(null);
   const [dbProjects, setDbProjects] = useState(null);
+  const [showWizard, setShowWizard] = useState(false);
   const tr = t(lang);
 
   useEffect(() => {
@@ -896,13 +929,14 @@ export default function App() {
       )}
 
       <div style={{ padding:"20px 20px 48px", maxWidth:640, margin:"0 auto" }}>
-        {screen==="s1" && <S1_Projects onSelect={go.s2} tr={tr} lang={lang} projects={activeProjects} />}
+        {screen==="s1" && <S1_Projects onSelect={go.s2} tr={tr} lang={lang} projects={activeProjects} onNewProject={() => setShowWizard(true)} />}
         {screen==="s2" && proj && <S2_Project project={proj} onBack={go.s1} onBuilding={go.s3} tr={tr} lang={lang} />}
         {screen==="s3" && bldg && <S3_Building building={bldg} project={proj} onBack={go.back2} onUnit={go.s4} tr={tr} lang={lang} />}
         {screen==="s4" && unit && <S4_Unit unit={unit} building={bldg} project={proj} onBack={go.back3} onCluster={go.s5} tr={tr} lang={lang} />}
         {screen==="s5" && cluster && <S5_Cluster cluster={cluster} unit={unit} building={bldg} onBack={go.back4} onItem={go.s6} tr={tr} lang={lang} />}
         {screen==="s6" && lineItem && <S6_LineItem item={lineItem} cluster={cluster} unit={unit} building={bldg} onBack={go.back5} tr={tr} lang={lang} />}
       </div>
+      {showWizard && <NewProjectWizard onClose={() => setShowWizard(false)} onSaved={() => { setShowWizard(false); window.location.reload(); }} />}
     </div>
   );
 }
