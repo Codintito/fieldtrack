@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { supabase } from "@/lib/supabase";
 import NewProjectWizard from "@/app/NewProjectWizard";
+import EditProjectModal from "@/app/EditProjectModal";
 
 // ─── TRANSLATIONS ─────────────────────────────────────────────────────────────
 const T = {
@@ -284,10 +285,29 @@ const LangToggle = ({ lang, setLang }) => (
 
 function S1_Projects({ onSelect, tr, lang, projects, onNewProject }) {
   const [filter, setFilter] = useState("all");
+  const [deleteConfirm, setDeleteConfirm] = useState(null);
   const SC = STATUS_CFG(tr);
-  const visible = filter === "all" ? projects : projects.filter(p => p.status === filter);
-  const totalVal = projects.reduce((s, p) => s + (p.contract_value || p.contractValue || 0), 0);
-  const totalInv = projects.reduce((s, p) => s + pct(p.invoicedItems || 0, p.totalItems || 1) / 100 * (p.contract_value || p.contractValue || 0), 0);
+
+  const nonArchived = projects.filter(p => p.status !== "archived");
+  const archived = projects.filter(p => p.status === "archived");
+  const visible = filter === "archived" ? archived
+    : filter === "all" ? nonArchived
+    : nonArchived.filter(p => p.status === filter);
+
+  const totalVal = nonArchived.reduce((s, p) => s + (p.contract_value || p.contractValue || 0), 0);
+  const totalInv = nonArchived.reduce((s, p) => s + pct(p.invoicedItems || 0, p.totalItems || 1) / 100 * (p.contract_value || p.contractValue || 0), 0);
+
+  const handleRecover = async (p) => {
+    await supabase.from('projects').update({ status: 'active' }).eq('id', p.id);
+    window.location.reload();
+  };
+
+  const handlePermDelete = async (p) => {
+    await supabase.from('projects').delete().eq('id', p.id);
+    setDeleteConfirm(null);
+    window.location.reload();
+  };
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 28 }}>
@@ -299,9 +319,9 @@ function S1_Projects({ onSelect, tr, lang, projects, onNewProject }) {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 24 }}>
-        {[[tr("portfolio_value"), fmt(totalVal), `${projects.length} ${tr("contracts")}`],
-          [tr("total_invoiced"), fmt(totalInv), `${Math.round(totalInv/totalVal*100)}${tr("of_portfolio")}`],
-          [tr("active_projects"), projects.filter(p=>p.status==="active").length, tr("currently_running")]
+        {[[tr("portfolio_value"), fmt(totalVal), `${nonArchived.length} ${tr("contracts")}`],
+          [tr("total_invoiced"), fmt(totalInv), `${totalVal > 0 ? Math.round(totalInv/totalVal*100) : 0}${tr("of_portfolio")}`],
+          [tr("active_projects"), nonArchived.filter(p=>p.status==="active").length, tr("currently_running")]
         ].map(([l,v,s],i) => (
           <Card key={i}>
             <div style={{ fontSize: 10, color: "#6B7280", fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 6 }}>{l}</div>
@@ -312,17 +332,27 @@ function S1_Projects({ onSelect, tr, lang, projects, onNewProject }) {
       </div>
 
       <div style={{ display: "flex", borderBottom: "1px solid #1E2D3D", marginBottom: 20, overflowX: "auto" }}>
-        {[["all",tr("all"),projects.length],["active",tr("active"),projects.filter(p=>p.status==="active").length],["on_hold",tr("on_hold"),projects.filter(p=>p.status==="on_hold").length],["completed",tr("completed"),projects.filter(p=>p.status==="completed").length]].map(([v,l,n])=>(
-          <Tab key={v} label={l} active={filter===v} onClick={()=>setFilter(v)} n={n} />
+        {[
+          ["all", tr("all"), nonArchived.length],
+          ["active", tr("active"), nonArchived.filter(p=>p.status==="active").length],
+          ["on_hold", tr("on_hold"), nonArchived.filter(p=>p.status==="on_hold").length],
+          ["completed", tr("completed"), nonArchived.filter(p=>p.status==="completed").length],
+          ["archived", tr("s_archived"), archived.length],
+        ].map(([v,l,n]) => (
+          <Tab key={v} label={l} active={filter===v} onClick={()=>{ setFilter(v); setDeleteConfirm(null); }} n={n} />
         ))}
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         {visible.map(p => {
           const progress = pct(p.invoicedItems, p.totalItems);
-          const invVal = Math.round(progress/100*p.contractValue);
+          const invVal = Math.round(progress/100*(p.contractValue||p.contract_value||0));
+          const isArchived = p.status === "archived";
+          const pendingDelete = deleteConfirm === p.id;
+
           return (
-            <Card key={p.id} onClick={() => onSelect(p)}>
+            <Card key={p.id} onClick={isArchived ? undefined : () => onSelect(p)}
+              style={{ opacity: isArchived ? 0.75 : 1 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
                 <div style={{ paddingRight: 10 }}>
                   <div style={{ fontSize: 15, fontWeight: 700, color: "#F1F5F9", marginBottom: 4 }}>{p.name}</div>
@@ -331,14 +361,37 @@ function S1_Projects({ onSelect, tr, lang, projects, onNewProject }) {
                 <Badge status={p.status} config={SC.project} />
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-                <div style={{ fontSize: 12, color: "#94A3B8" }}><span style={{ color: "#F1F5F9", fontWeight: 700 }}>{fmt(invVal)}</span> {tr("invoiced_of")} {fmt(p.contractValue)}</div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: progress===100?"#10B981":"#F59E0B" }}>{progress}%</div>
+                <div style={{ fontSize: 12, color: "#94A3B8" }}><span style={{ color: "#F1F5F9", fontWeight: 700 }}>{fmt(invVal)}</span> {tr("invoiced_of")} {fmt(p.contractValue||p.contract_value||0)}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#6B7280" }}>{progress}%</div>
               </div>
-              <Bar value={progress} color={p.status==="completed"?"#10B981":"#F59E0B"} />
+              <Bar value={progress} color="#4B5563" />
               <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10 }}>
                 <div style={{ fontSize: 11, color: "#4B5563" }}>GC: {p.gc}</div>
                 <div style={{ fontSize: 11, color: "#4B5563" }}>{p.invoicedItems} / {p.totalItems} {tr("units_invoiced")}</div>
               </div>
+
+              {isArchived && (
+                <div style={{ display: "flex", gap: 8, marginTop: 14, paddingTop: 14, borderTop: "1px solid #1E2D3D" }}>
+                  <button
+                    onClick={e => { e.stopPropagation(); handleRecover(p); }}
+                    style={{ flex: 1, background: "#064E3B", border: "none", borderRadius: 8, padding: "9px 0", color: "#6EE7B7", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
+                    ↩ Recover
+                  </button>
+                  {!pendingDelete ? (
+                    <button
+                      onClick={e => { e.stopPropagation(); setDeleteConfirm(p.id); }}
+                      style={{ flex: 1, background: "#1F2937", border: "1px solid #EF444433", borderRadius: 8, padding: "9px 0", color: "#EF4444", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
+                      🗑 Delete
+                    </button>
+                  ) : (
+                    <button
+                      onClick={e => { e.stopPropagation(); handlePermDelete(p); }}
+                      style={{ flex: 1, background: "#7F1D1D", border: "1px solid #EF4444", borderRadius: 8, padding: "9px 0", color: "#FCA5A5", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
+                      Confirm Delete
+                    </button>
+                  )}
+                </div>
+              )}
             </Card>
           );
         })}
@@ -349,7 +402,7 @@ function S1_Projects({ onSelect, tr, lang, projects, onNewProject }) {
 
 // ─── SCREEN 2 — PROJECT DETAIL (buildings list) ───────────────────────────────
 
-function S2_Project({ project: p, onBack, onBuilding, tr, lang }) {
+function S2_Project({ project: p, onBack, onBuilding, tr, lang, onEdit, onArchive }) {
   const [tab, setTab] = useState("buildings");
   const SC = STATUS_CFG(tr);
   const progress = pct(p.invoicedItems, p.totalItems);
@@ -359,7 +412,10 @@ function S2_Project({ project: p, onBack, onBuilding, tr, lang }) {
   const retainage = Math.round(invVal*(p.retainage/100));
   const net = invVal - retainage;
   const received = p.payments.reduce((s,pay)=>s+pay.amount,0);
-
+  const handleStatusChange = async (newStatus) => {
+  await supabase.from('projects').update({ status: newStatus }).eq('id', p.id);
+  window.location.reload();
+  };
   return (
     <div>
       <BackBtn onClick={onBack} label={tr("back_projects")} />
@@ -369,7 +425,33 @@ function S2_Project({ project: p, onBack, onBuilding, tr, lang }) {
           <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: "#F1F5F9" }}>{p.name}</h2>
           <div style={{ fontSize: 12, color: "#6B7280", marginTop: 4 }}>📍 {p.address}</div>
         </div>
-        <Badge status={p.status} config={SC.project} />
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-end" }}>
+  <Badge status={p.status} config={SC.project} />
+
+  <div style={{ display: "flex", gap: 8 }}>
+    <button
+      onClick={onEdit}
+      style={{ background: "#1F2937", border: "none", borderRadius: 7, padding: "6px 12px", color: "#F1F5F9", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+    >
+      ✏️ Edit
+    </button>
+
+    <button
+      onClick={onArchive}
+      style={{ background: "#1F2937", border: "none", borderRadius: 7, padding: "6px 12px", color: "#F59E0B", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+    >
+      📦 Archive
+    </button>
+  </div>
+  <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+  {["active","on_hold","completed"].map(s => (
+    <button key={s} onClick={() => p.status !== s && handleStatusChange(s)}
+      style={{ background: p.status===s ? STATUS_CFG(tr).project[s]?.bg : "#1F2937", color: p.status===s ? STATUS_CFG(tr).project[s]?.text : "#6B7280", border: "none", borderRadius: 6, padding: "4px 10px", fontSize: 11, fontWeight: 700, cursor: p.status===s?"default":"pointer" }}>
+      {STATUS_CFG(tr).project[s]?.label}
+    </button>
+  ))}
+</div>
+</div>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
@@ -606,32 +688,34 @@ function S4_Unit({ unit: u, building: b, project, onBack, onCluster, tr, lang })
   const up = pct(u.invoicedItems, u.totalItems);
 
   useEffect(() => {
-    supabase
-      .from('line_item_groups')
-      .select('*, line_items(*)')
-      .eq('project_id', project.id)
-      .then(({ data, error }) => {
-        if (error) { console.error(error); return; }
-        if (data && data.length > 0) {
-          setDbGroups(data);
-          const items = data.flatMap(g =>
-            (g.line_items || []).map(item => ({
-              id: item.id,
-              groupId: g.id,
-              label: item.label,
-              labelEs: item.label_es || item.label,
-              unitPrice: item.unit_price,
-              status: 'not_started',
-              photos: 0,
-            }))
-          );
-          setAllItems(items);
-        } else {
-          const fallback = UNIT_LINE_ITEMS[u.id] || UNIT_LINE_ITEMS[303] || [];
-          setAllItems(fallback);
-        }
-      });
-  }, [u.id, project.id]);
+  const fetchData = async () => {
+    const [{ data: groupData, error }, { data: uliData }] = await Promise.all([
+      supabase.from('line_item_groups').select('*, line_items(*)').eq('project_id', project.id),
+      supabase.from('unit_line_items').select('*').eq('unit_id', u.id)
+    ]);
+    if (error) { console.error(error); return; }
+    const uliMap = {};
+    (uliData || []).forEach(r => { uliMap[r.line_item_id] = r; });
+    if (groupData && groupData.length > 0) {
+      setDbGroups(groupData);
+      setAllItems(groupData.flatMap(g =>
+        (g.line_items || []).map(item => {
+          const uli = uliMap[item.id];
+          return {
+            id: item.id, groupId: g.id,
+            label: item.label, labelEs: item.label_es || item.label,
+            unitPrice: item.unit_price,
+            status: uli?.status || 'not_started',
+            photos: 0,
+          };
+        })
+      ));
+    } else {
+      setAllItems(UNIT_LINE_ITEMS[u.id] || UNIT_LINE_ITEMS[303] || []);
+    }
+  };
+  fetchData();
+}, [u.id, project.id]);
 
   // Group items by groupId
   const clustersMap = {};
@@ -755,10 +839,39 @@ function S5_Cluster({ cluster: { group: g, items }, unit: u, building: b, onBack
 
 function S6_LineItem({ item, cluster: { group: g }, unit: u, building: b, onBack, tr, lang }) {
   const [modal, setModal] = useState(false);
+  const [status, setStatus] = useState(item.status);
+  const [invoiceRef, setInvoiceRef] = useState('');
+  const [saving, setSaving] = useState(false);
   const SC = STATUS_CFG(tr);
   const itemLabel = loc(lang, item.label, item.labelEs);
   const groupName = loc(lang, g.name, g.nameEs);
   const photoColors = ["#1E3A2F","#1A2E3D","#2D2014","#1F1A2E"];
+
+  const saveStatus = async (newStatus, extra = {}) => {
+    setSaving(true);
+    const { data: existing } = await supabase
+      .from('unit_line_items').select('id')
+      .eq('unit_id', u.id).eq('line_item_id', item.id).single();
+    if (existing) {
+      await supabase.from('unit_line_items')
+        .update({ status: newStatus, ...extra }).eq('id', existing.id);
+    } else {
+      await supabase.from('unit_line_items')
+        .insert([{ unit_id: u.id, line_item_id: item.id, status: newStatus, ...extra }]);
+    }
+    setStatus(newStatus);
+    setSaving(false);
+  };
+
+  const handleApprove = () => saveStatus('approved');
+  const handleRedo = () => saveStatus('not_started');
+  const handleInvoice = async () => {
+    await saveStatus('invoiced', {
+      invoice_ref: invoiceRef,
+      invoiced_at: new Date().toISOString()
+    });
+    setModal(false);
+  };
 
   return (
     <div>
@@ -768,7 +881,7 @@ function S6_LineItem({ item, cluster: { group: g }, unit: u, building: b, onBack
           <div style={{ fontSize: 11, color: "#F59E0B", fontWeight: 700, letterSpacing: ".12em", textTransform: "uppercase", marginBottom: 4 }}>{groupName} · {u.name}</div>
           <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, color: "#F1F5F9" }}>{itemLabel}</h2>
         </div>
-        <Badge status={item.status} config={SC.lineitem} />
+        <Badge status={status} config={SC.lineitem} />
       </div>
 
       <Card style={{ marginBottom: 16 }}>
@@ -798,15 +911,15 @@ function S6_LineItem({ item, cluster: { group: g }, unit: u, building: b, onBack
         </div>
       )}
 
-      {item.status==="not_started" && <button style={{ width:"100%", background:"#F59E0B", color:"#0A0F1E", border:"none", borderRadius:10, padding:14, fontWeight:800, fontSize:15, cursor:"pointer", marginBottom:10 }}>{tr("submit_photos")}</button>}
-      {item.status==="pending_review" && (
+      {status==="not_started" && <button style={{ width:"100%", background:"#F59E0B", color:"#0A0F1E", border:"none", borderRadius:10, padding:14, fontWeight:800, fontSize:15, cursor:"pointer", marginBottom:10 }}>{tr("submit_photos")}</button>}
+      {status==="pending_review" && (
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:10 }}>
-          <button style={{ background:"#10B981", color:"#fff", border:"none", borderRadius:10, padding:13, fontWeight:700, fontSize:13, cursor:"pointer" }}>{tr("approve")}</button>
-          <button style={{ background:"#1F2937", color:"#EF4444", border:"1px solid #EF444444", borderRadius:10, padding:13, fontWeight:700, fontSize:13, cursor:"pointer" }}>{tr("request_redo")}</button>
+          <button onClick={handleApprove} disabled={saving} style={{ background:"#10B981", color:"#fff", border:"none", borderRadius:10, padding:13, fontWeight:700, fontSize:13, cursor:"pointer", opacity: saving?0.7:1 }}>{saving ? "..." : tr("approve")}</button>
+          <button onClick={handleRedo} disabled={saving} style={{ background:"#1F2937", color:"#EF4444", border:"1px solid #EF444444", borderRadius:10, padding:13, fontWeight:700, fontSize:13, cursor:"pointer", opacity: saving?0.7:1 }}>{saving ? "..." : tr("request_redo")}</button>
         </div>
       )}
-      {item.status==="approved" && <button onClick={()=>setModal(true)} style={{ width:"100%", background:"#3B82F6", color:"#fff", border:"none", borderRadius:10, padding:14, fontWeight:800, fontSize:15, cursor:"pointer", marginBottom:10 }}>{tr("mark_invoiced")}</button>}
-      {item.status==="invoiced" && (
+      {status==="approved" && <button onClick={()=>setModal(true)} style={{ width:"100%", background:"#3B82F6", color:"#fff", border:"none", borderRadius:10, padding:14, fontWeight:800, fontSize:15, cursor:"pointer", marginBottom:10 }}>{tr("mark_invoiced")}</button>}
+      {status==="invoiced" && (
         <div style={{ background:"#0D1B2A", borderRadius:10, padding:14, border:"1px solid #1E3A5F", textAlign:"center" }}>
           <div style={{ color:"#93C5FD", fontSize:13, fontWeight:700 }}>{tr("invoiced_locked")}</div>
           <div style={{ color:"#4B5563", fontSize:11, marginTop:4 }}>{tr("invoiced_locked_sub")}</div>
@@ -819,10 +932,15 @@ function S6_LineItem({ item, cluster: { group: g }, unit: u, building: b, onBack
             <div style={{ fontSize:16, fontWeight:800, color:"#F1F5F9", marginBottom:6 }}>{tr("mark_invoiced_title")}</div>
             <div style={{ fontSize:13, color:"#6B7280", marginBottom:20 }}>{tr("mark_invoiced_note")}</div>
             <label style={{ fontSize:11, color:"#6B7280", display:"block", marginBottom:6 }}>{tr("invoice_ref")}</label>
-            <input placeholder={tr("invoice_placeholder")} style={{ width:"100%", background:"#0D1B2A", border:"1px solid #1E2D3D", borderRadius:8, padding:"10px 12px", color:"#F1F5F9", fontSize:13, boxSizing:"border-box", marginBottom:20 }} />
+            <input
+              value={invoiceRef}
+              onChange={e => setInvoiceRef(e.target.value)}
+              placeholder={tr("invoice_placeholder")}
+              style={{ width:"100%", background:"#0D1B2A", border:"1px solid #1E2D3D", borderRadius:8, padding:"10px 12px", color:"#F1F5F9", fontSize:13, boxSizing:"border-box", marginBottom:20 }}
+            />
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
               <button onClick={()=>setModal(false)} style={{ background:"#1F2937", border:"none", borderRadius:8, padding:12, color:"#94A3B8", fontWeight:700, fontSize:13, cursor:"pointer" }}>{tr("cancel")}</button>
-              <button onClick={()=>setModal(false)} style={{ background:"#3B82F6", border:"none", borderRadius:8, padding:12, color:"#fff", fontWeight:700, fontSize:13, cursor:"pointer" }}>{tr("confirm")}</button>
+              <button onClick={handleInvoice} disabled={saving} style={{ background:"#3B82F6", border:"none", borderRadius:8, padding:12, color:"#fff", fontWeight:700, fontSize:13, cursor:"pointer", opacity: saving?0.7:1 }}>{saving ? "Saving..." : tr("confirm")}</button>
             </div>
           </div>
         </div>
@@ -843,6 +961,8 @@ export default function App() {
   const [lineItem, setLineItem] = useState(null);
   const [dbProjects, setDbProjects] = useState(null);
   const [showWizard, setShowWizard] = useState(false);
+  const [editProject, setEditProject] = useState(null);
+  const [archiveConfirm, setArchiveConfirm] = useState(null);
   const tr = t(lang);
 
   useEffect(() => {
@@ -930,13 +1050,37 @@ export default function App() {
 
       <div style={{ padding:"20px 20px 48px", maxWidth:640, margin:"0 auto" }}>
         {screen==="s1" && <S1_Projects onSelect={go.s2} tr={tr} lang={lang} projects={activeProjects} onNewProject={() => setShowWizard(true)} />}
-        {screen==="s2" && proj && <S2_Project project={proj} onBack={go.s1} onBuilding={go.s3} tr={tr} lang={lang} />}
+        {screen==="s2" && proj && <S2_Project project={proj} onBack={go.s1} onBuilding={go.s3} tr={tr} lang={lang} onEdit={() => setEditProject(proj)} onArchive={() => setArchiveConfirm(proj)} />}
         {screen==="s3" && bldg && <S3_Building building={bldg} project={proj} onBack={go.back2} onUnit={go.s4} tr={tr} lang={lang} />}
         {screen==="s4" && unit && <S4_Unit unit={unit} building={bldg} project={proj} onBack={go.back3} onCluster={go.s5} tr={tr} lang={lang} />}
         {screen==="s5" && cluster && <S5_Cluster cluster={cluster} unit={unit} building={bldg} onBack={go.back4} onItem={go.s6} tr={tr} lang={lang} />}
         {screen==="s6" && lineItem && <S6_LineItem item={lineItem} cluster={cluster} unit={unit} building={bldg} onBack={go.back5} tr={tr} lang={lang} />}
       </div>
       {showWizard && <NewProjectWizard onClose={() => setShowWizard(false)} onSaved={() => { setShowWizard(false); window.location.reload(); }} />}
+        {editProject && (
+  <EditProjectModal
+    project={editProject}
+    onClose={() => setEditProject(null)}
+    onSaved={() => { setEditProject(null); window.location.reload(); }}
+  />
+)}
+
+{archiveConfirm && (
+  <div style={{ position: "fixed", inset: 0, background: "#000000CC", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+    <div style={{ background: "#111827", border: "1px solid #1E2D3D", borderRadius: 16, padding: 24, width: "100%", maxWidth: 360 }}>
+      <div style={{ fontSize: 16, fontWeight: 800, color: "#F1F5F9", marginBottom: 8 }}>Archive Project?</div>
+      <div style={{ fontSize: 13, color: "#6B7280", marginBottom: 20 }}>{archiveConfirm.name} will be hidden from your projects list. You can recover it from the Archived tab.</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <button onClick={() => setArchiveConfirm(null)} style={{ background: "#1F2937", border: "none", borderRadius: 8, padding: 12, color: "#94A3B8", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Cancel</button>
+        <button onClick={async () => {
+          await supabase.from('projects').update({ status: 'archived' }).eq('id', archiveConfirm.id);
+          setArchiveConfirm(null);
+          window.location.reload();
+        }} style={{ background: "#F59E0B", border: "none", borderRadius: 8, padding: 12, color: "#0A0F1E", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Archive</button>
+      </div>
+    </div>
+  </div>
+)}
     </div>
   );
 }
