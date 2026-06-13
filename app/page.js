@@ -403,6 +403,7 @@ function S2_Project({ project: p, onBack, onBuilding, tr, lang, onEdit, onArchiv
   const [showCoForm, setShowCoForm] = useState(false);
   const [coForm, setCoForm] = useState({ co_num: '', description: '', amount: '' });
   const [coSaving, setCoSaving] = useState(false);
+  const [showInvoice, setShowInvoice] = useState(false);
 
   const progress = pct(p.invoicedItems, p.totalItems);
   const invVal = Math.round(progress/100*p.contractValue);
@@ -653,6 +654,7 @@ function S2_Project({ project: p, onBack, onBuilding, tr, lang, onEdit, onArchiv
               </div>
             </Card>
           ))}
+          <button onClick={() => setShowInvoice(true)} style={{ width: "100%", background: "#F59E0B", color: "#0A0F1E", border: "none", borderRadius: 8, padding: 12, fontWeight: 700, fontSize: 13, cursor: "pointer", marginTop: 16 }}>📄 Generate Invoice</button>
           <button style={{ width: "100%", background: "none", border: "1px dashed #2D3F55", borderRadius: 8, padding: 12, color: "#6B7280", fontSize: 13, cursor: "pointer", marginTop: 8 }}>{tr("record_manual")}</button>
         </div>
       )}
@@ -662,6 +664,7 @@ function S2_Project({ project: p, onBack, onBuilding, tr, lang, onEdit, onArchiv
 
       {/* FILES TAB */}
       {tab === "files" && <FilesTab projectId={p.id} />}
+      {showInvoice && <InvoiceGenerator project={p} onClose={() => { setShowInvoice(false); window.location.reload(); }} />}
     </div>
   );
 }
@@ -1288,6 +1291,203 @@ function FilesTab({ projectId }) {
         <input type="file" style={{ display: "none" }} onChange={handleUpload} disabled={uploading} />
         <span style={{ color: "#6B7280", fontSize: 13 }}>{uploading ? "Uploading..." : "+ Upload File"}</span>
       </label>
+    </div>
+  );
+}
+
+function InvoiceGenerator({ project, onClose }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [invoiceNum, setInvoiceNum] = useState(
+    `INV-${new Date().getFullYear()}${String(new Date().getMonth()+1).padStart(2,'0')}${String(new Date().getDate()).padStart(2,'0')}`
+  );
+  const [generating, setGenerating] = useState(false);
+  const [marking, setMarking] = useState(false);
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    const load = async () => {
+      const { data: units } = await supabase.from('units').select('id, name, unit_type').eq('project_id', project.id);
+      const unitMap = {};
+      (units || []).forEach(u => { unitMap[u.id] = u; });
+      const unitIds = (units || []).map(u => u.id);
+      if (unitIds.length === 0) { setItems([]); setLoading(false); return; }
+      const { data: ulis } = await supabase.from('unit_line_items')
+        .select('*, line_items(label, unit_price, line_item_groups(name, cost_code))')
+        .eq('status', 'approved')
+        .in('unit_id', unitIds);
+      const rows = (ulis || []).map(uli => ({
+        id: uli.id,
+        unitName: unitMap[uli.unit_id]?.name || '',
+        label: uli.line_items?.label || '',
+        costCode: uli.line_items?.line_item_groups?.cost_code || '',
+        amount: Number(uli.line_items?.unit_price || 0),
+      }));
+      rows.sort((a, b) => (a.costCode || '').localeCompare(b.costCode || ''));
+      setItems(rows);
+      setLoading(false);
+    };
+    load();
+  }, [project.id]);
+
+  const subtotal = items.reduce((s, i) => s + i.amount, 0);
+  const retPct = Number(project.retainage || 10);
+  const retainage = Math.round(subtotal * (retPct / 100));
+  const net = subtotal - retainage;
+
+  const generatePdf = async () => {
+    setGenerating(true);
+    try {
+      const { default: jsPDF } = await import('jspdf');
+      const autoTable = (await import('jspdf-autotable')).default;
+      const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+
+      doc.setFontSize(20); doc.setFont(undefined, 'bold');
+      doc.text('KING 23 LLC', 14, 20);
+      doc.setFontSize(10); doc.setFont(undefined, 'normal');
+      doc.text('Subcontractor', 14, 26);
+
+      doc.setFontSize(16); doc.setFont(undefined, 'bold');
+      doc.text('INVOICE', pageWidth - 14, 20, { align: 'right' });
+      doc.setFontSize(10); doc.setFont(undefined, 'normal');
+      doc.text(`Invoice #: ${invoiceNum}`, pageWidth - 14, 27, { align: 'right' });
+      doc.text(`Date: ${new Date().toLocaleDateString()}`, pageWidth - 14, 32, { align: 'right' });
+
+      doc.setFont(undefined, 'bold'); doc.text('BILL TO', 14, 44);
+      doc.setFont(undefined, 'normal');
+      doc.text(project.gc || '', 14, 50);
+      if (project.gcContact) doc.text(project.gcContact, 14, 55);
+      if (project.gcEmail) doc.text(project.gcEmail, 14, 60);
+
+      doc.setFont(undefined, 'bold'); doc.text('PROJECT', pageWidth - 14, 44, { align: 'right' });
+      doc.setFont(undefined, 'normal');
+      doc.text(project.name || '', pageWidth - 14, 50, { align: 'right' });
+      doc.text(`Contract: ${project.contractNum || ''}`, pageWidth - 14, 55, { align: 'right' });
+
+      autoTable(doc, {
+        startY: 70,
+        head: [['Cost Code', 'Description', 'Unit', 'Amount']],
+        body: items.map(i => [i.costCode, i.label, i.unitName, fmt(i.amount)]),
+        theme: 'striped',
+        headStyles: { fillColor: [245, 158, 11], textColor: [10, 15, 30], fontStyle: 'bold' },
+        styles: { fontSize: 9, cellPadding: 3 },
+        columnStyles: { 3: { halign: 'right' } },
+      });
+
+      let y = doc.lastAutoTable.finalY + 10;
+      const labelX = pageWidth - 75;
+      const valX = pageWidth - 14;
+      doc.setFontSize(10); doc.setFont(undefined, 'normal');
+      doc.text('Subtotal:', labelX, y); doc.text(fmt(subtotal), valX, y, { align: 'right' }); y += 6;
+      doc.text(`Retainage (${retPct}%):`, labelX, y); doc.text(`- ${fmt(retainage)}`, valX, y, { align: 'right' }); y += 7;
+      doc.setFont(undefined, 'bold'); doc.setFontSize(12);
+      doc.text('Net Amount Due:', labelX, y); doc.text(fmt(net), valX, y, { align: 'right' });
+
+      doc.setFont(undefined, 'normal'); doc.setFontSize(9);
+      doc.text('Remit to King 23 LLC  ·  Payment due per 14-day cycle', 14, pageHeight - 14);
+
+      doc.save(`${invoiceNum}_${(project.name || 'invoice').replace(/[^a-z0-9]/gi,'_')}.pdf`);
+    } catch (err) {
+      console.error(err);
+      alert('PDF generation failed: ' + err.message);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const markInvoiced = async () => {
+    setMarking(true);
+    for (const i of items) {
+      await supabase.from('unit_line_items').update({
+        status: 'invoiced', invoice_ref: invoiceNum, invoiced_at: new Date().toISOString(),
+      }).eq('id', i.id);
+    }
+    setMarking(false);
+    setDone(true);
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#0A0F1E", zIndex: 150, overflowY: "auto" }}>
+      <div style={{ background: "#0D1320", borderBottom: "1px solid #1E2D3D", padding: "0 20px", height: 52, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 50 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ background: "#F59E0B", width: 28, height: 28, borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>📄</div>
+          <span style={{ fontSize: 14, fontWeight: 800, color: "#F1F5F9" }}>Generate Invoice</span>
+        </div>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: "#6B7280", fontSize: 20, cursor: "pointer" }}>✕</button>
+      </div>
+
+      <div style={{ padding: "20px 20px 48px", maxWidth: 640, margin: "0 auto" }}>
+        {loading && <div style={{ textAlign: "center", padding: 40, color: "#6B7280" }}>Loading approved items...</div>}
+
+        {!loading && items.length === 0 && (
+          <div style={{ textAlign: "center", padding: 60 }}>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>📭</div>
+            <div style={{ color: "#F1F5F9", fontSize: 16, fontWeight: 700, marginBottom: 6 }}>Nothing to invoice</div>
+            <div style={{ color: "#6B7280", fontSize: 13 }}>No approved items are waiting to be invoiced.</div>
+          </div>
+        )}
+
+        {!loading && items.length > 0 && (
+          <div>
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ fontSize: 11, color: "#6B7280", fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Invoice Number</label>
+              <input value={invoiceNum} onChange={e => setInvoiceNum(e.target.value)}
+                style={{ width: "100%", background: "#0D1B2A", border: "1px solid #1E2D3D", borderRadius: 8, padding: "10px 12px", color: "#F1F5F9", fontSize: 13, boxSizing: "border-box" }} />
+            </div>
+
+            <div style={{ background: "#111827", border: "1px solid #1E2D3D", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+              <div style={{ fontSize: 11, color: "#6B7280", fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 12 }}>
+                {items.length} approved item{items.length !== 1 ? 's' : ''}
+              </div>
+              {items.map(i => (
+                <div key={i.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid #1E2D3D" }}>
+                  <div style={{ paddingRight: 12 }}>
+                    <div style={{ fontSize: 13, color: "#F1F5F9", fontWeight: 600 }}>{i.label}</div>
+                    <div style={{ fontSize: 11, color: "#6B7280", marginTop: 2 }}>{i.costCode} · {i.unitName}</div>
+                  </div>
+                  <div style={{ fontSize: 13, color: "#E2E8F0", fontWeight: 700 }}>{fmt(i.amount)}</div>
+                </div>
+              ))}
+              <div style={{ marginTop: 14 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0" }}>
+                  <span style={{ fontSize: 13, color: "#6B7280" }}>Subtotal</span>
+                  <span style={{ fontSize: 13, color: "#F1F5F9", fontWeight: 600 }}>{fmt(subtotal)}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0" }}>
+                  <span style={{ fontSize: 13, color: "#6B7280" }}>Retainage ({retPct}%)</span>
+                  <span style={{ fontSize: 13, color: "#EF4444", fontWeight: 600 }}>− {fmt(retainage)}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0 0", borderTop: "1px solid #1E2D3D", marginTop: 6 }}>
+                  <span style={{ fontSize: 14, color: "#F1F5F9", fontWeight: 800 }}>Net Amount Due</span>
+                  <span style={{ fontSize: 14, color: "#10B981", fontWeight: 800 }}>{fmt(net)}</span>
+                </div>
+              </div>
+            </div>
+
+            <button onClick={generatePdf} disabled={generating}
+              style={{ width: "100%", background: "#F59E0B", color: "#0A0F1E", border: "none", borderRadius: 10, padding: 14, fontWeight: 800, fontSize: 15, cursor: "pointer", marginBottom: 10, opacity: generating ? 0.7 : 1 }}>
+              {generating ? "Generating..." : "⬇ Download PDF Invoice"}
+            </button>
+
+            {!done ? (
+              <button onClick={markInvoiced} disabled={marking}
+                style={{ width: "100%", background: "#1F2937", color: "#3B82F6", border: "1px solid #3B82F644", borderRadius: 10, padding: 13, fontWeight: 700, fontSize: 13, cursor: "pointer", opacity: marking ? 0.7 : 1 }}>
+                {marking ? "Updating..." : "✓ Mark these items as Invoiced"}
+              </button>
+            ) : (
+              <div style={{ background: "#0D1B2A", borderRadius: 10, padding: 14, border: "1px solid #1E3A5F", textAlign: "center" }}>
+                <div style={{ color: "#93C5FD", fontSize: 13, fontWeight: 700 }}>✓ {items.length} items marked as invoiced</div>
+                <div style={{ color: "#4B5563", fontSize: 11, marginTop: 4 }}>Close this window to refresh the project.</div>
+              </div>
+            )}
+            <div style={{ fontSize: 11, color: "#4B5563", textAlign: "center", marginTop: 10 }}>
+              Generate and review the PDF first. Marking as invoiced is final and advances the progress bar.
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
