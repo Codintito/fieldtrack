@@ -397,18 +397,50 @@ function S1_Projects({ onSelect, tr, lang, projects, onNewProject }) {
 function S2_Project({ project: p, onBack, onBuilding, tr, lang, onEdit, onArchive }) {
   const [tab, setTab] = useState("buildings");
   const SC = STATUS_CFG(tr);
+
+  // Change orders live in local state so the create flow + financials stay in sync
+  const [cos, setCos] = useState(p.changeOrders || []);
+  const [showCoForm, setShowCoForm] = useState(false);
+  const [coForm, setCoForm] = useState({ co_num: '', description: '', amount: '' });
+  const [coSaving, setCoSaving] = useState(false);
+
   const progress = pct(p.invoicedItems, p.totalItems);
   const invVal = Math.round(progress/100*p.contractValue);
-  const coTotal = p.changeOrders.filter(c=>c.status==="approved").reduce((s,c)=>s+c.amount,0);
+  const coTotal = cos.filter(c => c.status === "approved").reduce((s,c) => s + Number(c.amount||0), 0);
   const contractTotal = p.contractValue + coTotal;
   const retainage = Math.round(invVal*(p.retainage/100));
   const net = invVal - retainage;
-  const received = p.payments.reduce((s,pay)=>s+pay.amount,0);
+  const received = p.payments.reduce((s,pay) => s + pay.amount, 0);
 
   const handleStatusChange = async (newStatus) => {
     await supabase.from('projects').update({ status: newStatus }).eq('id', p.id);
     window.location.reload();
   };
+
+  const handleCreateCo = async () => {
+    if (!coForm.co_num.trim() || !coForm.amount) return;
+    setCoSaving(true);
+    const { data } = await supabase.from('change_orders').insert([{
+      project_id: p.id,
+      co_num: coForm.co_num,
+      description: coForm.description,
+      amount: Number(coForm.amount) || 0,
+      status: 'draft',
+      date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+    }]).select().single();
+    if (data) setCos(prev => [...prev, { ...data, coNum: data.co_num }]);
+    setCoForm({ co_num: '', description: '', amount: '' });
+    setShowCoForm(false);
+    setCoSaving(false);
+  };
+
+  const handleCoStatus = async (co, newStatus) => {
+    await supabase.from('change_orders').update({ status: newStatus }).eq('id', co.id);
+    setCos(prev => prev.map(c => c.id === co.id ? { ...c, status: newStatus } : c));
+  };
+
+  const coNextStatus = { draft: 'submitted', submitted: 'approved' };
+  const coNextLabel = { draft: 'Submit to GC', submitted: 'Mark Approved' };
 
   return (
     <div>
@@ -460,11 +492,13 @@ function S2_Project({ project: p, onBack, onBuilding, tr, lang, onEdit, onArchiv
 
       <div style={{ display: "flex", borderBottom: "1px solid #1E2D3D", marginBottom: 20, overflowX: "auto" }}>
         <Tab label={tr("buildings")} active={tab==="buildings"} onClick={()=>setTab("buildings")} n={p.buildings.length} />
-        <Tab label={tr("change_orders")} active={tab==="co"} onClick={()=>setTab("co")} n={p.changeOrders.length} />
+        <Tab label={tr("change_orders")} active={tab==="co"} onClick={()=>setTab("co")} n={cos.length} />
         <Tab label={tr("financials")} active={tab==="finance"} onClick={()=>setTab("finance")} />
+        <Tab label="Contacts" active={tab==="contacts"} onClick={()=>setTab("contacts")} />
         <Tab label={tr("files")} active={tab==="files"} onClick={()=>setTab("files")} />
       </div>
 
+      {/* BUILDINGS TAB */}
       {tab === "buildings" && (
         <div>
           <SectionLabel>{tr("buildings")}</SectionLabel>
@@ -520,27 +554,60 @@ function S2_Project({ project: p, onBack, onBuilding, tr, lang, onEdit, onArchiv
         </div>
       )}
 
+      {/* CHANGE ORDERS TAB */}
       {tab === "co" && (
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
             <div style={{ fontSize: 13, color: "#6B7280" }}>{tr("co_note")}</div>
-            <button style={{ background: "#F59E0B", color: "#0A0F1E", border: "none", borderRadius: 7, padding: "8px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>{tr("add_co")}</button>
+            <button onClick={() => setShowCoForm(!showCoForm)} style={{ background: "#F59E0B", color: "#0A0F1E", border: "none", borderRadius: 7, padding: "8px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>{tr("add_co")}</button>
           </div>
-          {p.changeOrders.length === 0
+
+          {showCoForm && (
+            <div style={{ background: "#0D1B2A", borderRadius: 12, padding: 16, marginBottom: 16, border: "1px solid #1E2D3D" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#F1F5F9", marginBottom: 14 }}>New Change Order</div>
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 11, color: "#6B7280", fontWeight: 700, display: "block", marginBottom: 4 }}>CO Number *</label>
+                <input value={coForm.co_num} onChange={e => setCoForm(c => ({ ...c, co_num: e.target.value }))} placeholder="e.g. CO-003"
+                  style={{ width: "100%", background: "#111827", border: "1px solid #1E2D3D", borderRadius: 8, padding: "9px 12px", color: "#F1F5F9", fontSize: 13, boxSizing: "border-box" }} />
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 11, color: "#6B7280", fontWeight: 700, display: "block", marginBottom: 4 }}>Description</label>
+                <textarea value={coForm.description} onChange={e => setCoForm(c => ({ ...c, description: e.target.value }))} placeholder="What does this change order cover?" rows={2}
+                  style={{ width: "100%", background: "#111827", border: "1px solid #1E2D3D", borderRadius: 8, padding: "9px 12px", color: "#F1F5F9", fontSize: 13, boxSizing: "border-box", resize: "none" }} />
+              </div>
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 11, color: "#6B7280", fontWeight: 700, display: "block", marginBottom: 4 }}>Amount ($) *</label>
+                <input value={coForm.amount} onChange={e => setCoForm(c => ({ ...c, amount: e.target.value }))} type="number" placeholder="e.g. 2400"
+                  style={{ width: "100%", background: "#111827", border: "1px solid #1E2D3D", borderRadius: 8, padding: "9px 12px", color: "#F1F5F9", fontSize: 13, boxSizing: "border-box" }} />
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <button onClick={() => { setShowCoForm(false); setCoForm({ co_num: '', description: '', amount: '' }); }} style={{ background: "#1F2937", border: "none", borderRadius: 8, padding: 10, color: "#94A3B8", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Cancel</button>
+                <button onClick={handleCreateCo} disabled={coSaving} style={{ background: "#10B981", border: "none", borderRadius: 8, padding: 10, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", opacity: coSaving ? 0.7 : 1 }}>{coSaving ? "Saving..." : "Create CO"}</button>
+              </div>
+            </div>
+          )}
+
+          {cos.length === 0 && !showCoForm
             ? <div style={{ textAlign: "center", padding: "40px 0", color: "#4B5563" }}>{tr("no_cos")}</div>
-            : p.changeOrders.map(co => (
+            : cos.map(co => (
               <Card key={co.id} style={{ marginBottom: 10 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
                   <div>
                     <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-                      <span style={{ fontSize: 13, fontWeight: 800, color: "#F59E0B" }}>{co.coNum}</span>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: "#F59E0B" }}>{co.coNum || co.co_num}</span>
                       <Badge status={co.status} config={SC.co} />
                     </div>
-                    <div style={{ fontSize: 14, color: "#E2E8F0", marginBottom: 4 }}>{co.description}</div>
-                    <div style={{ fontSize: 11, color: "#6B7280" }}>{tr("submitted")} {co.date}</div>
+                    {co.description && <div style={{ fontSize: 14, color: "#E2E8F0", marginBottom: 4 }}>{co.description}</div>}
+                    <div style={{ fontSize: 11, color: "#6B7280" }}>{co.date}</div>
                   </div>
-                  <div style={{ fontSize: 18, fontWeight: 800, color: "#F1F5F9" }}>{fmt(co.amount)}</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: "#F1F5F9" }}>{fmt(Number(co.amount||0))}</div>
                 </div>
+                {coNextStatus[co.status] && (
+                  <button onClick={() => handleCoStatus(co, coNextStatus[co.status])}
+                    style={{ width: "100%", background: "#1F2937", border: "1px solid #2D3F55", borderRadius: 8, padding: "8px 0", color: "#F59E0B", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
+                    {coNextLabel[co.status]} →
+                  </button>
+                )}
               </Card>
             ))
           }
@@ -553,6 +620,7 @@ function S2_Project({ project: p, onBack, onBuilding, tr, lang, onEdit, onArchiv
         </div>
       )}
 
+      {/* FINANCIALS TAB */}
       {tab === "finance" && (
         <div>
           {[
@@ -589,14 +657,11 @@ function S2_Project({ project: p, onBack, onBuilding, tr, lang, onEdit, onArchiv
         </div>
       )}
 
-      {tab === "files" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {[["SCD2602-008 Subcontract Agreement.pdf","Contract"],["Pickens Gardens Specification Book.pdf","Architecture"],["Project Schedule — Exhibit A.6.pdf","Schedule"],["Davis-Bacon Wage Decision SC2026.pdf","Compliance"]].map(([name,type],i)=>(
-            <Card key={i}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><div style={{ display: "flex", gap: 12, alignItems: "center" }}><div style={{ background: "#0D1B2A", borderRadius: 8, padding: "8px 10px", fontSize: 18 }}>📄</div><div><div style={{ fontSize: 13, color: "#F1F5F9", fontWeight: 600 }}>{name}</div><div style={{ fontSize: 11, color: "#6B7280", marginTop: 2 }}>{type}</div></div></div><span style={{ color: "#4B5563" }}>↓</span></div></Card>
-          ))}
-          <button style={{ width: "100%", background: "none", border: "1px dashed #2D3F55", borderRadius: 8, padding: 12, color: "#6B7280", fontSize: 13, cursor: "pointer" }}>{tr("upload_file")}</button>
-        </div>
-      )}
+      {/* CONTACTS TAB */}
+      {tab === "contacts" && <ContactsTab projectId={p.id} />}
+
+      {/* FILES TAB */}
+      {tab === "files" && <FilesTab projectId={p.id} />}
     </div>
   );
 }
@@ -1021,6 +1086,211 @@ if (photoErr) throw photoErr;
 }
 
 // ─── REVIEW FEED ──────────────────────────────────────────────────────────────
+
+function ContactsTab({ projectId }) {
+  const [contacts, setContacts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({ name: '', role: '', phone: '', email: '' });
+  const f = key => val => setForm(c => ({ ...c, [key]: val }));
+
+  useEffect(() => {
+    supabase.from('contacts').select('*').eq('project_id', projectId)
+      .order('name').then(({ data }) => { setContacts(data || []); setLoading(false); });
+  }, [projectId]);
+
+  const handleAdd = async () => {
+    if (!form.name.trim()) return;
+    setSaving(true);
+    const { data } = await supabase.from('contacts')
+      .insert([{ project_id: projectId, ...form }]).select().single();
+    if (data) setContacts(c => [...c, data]);
+    setForm({ name: '', role: '', phone: '', email: '' });
+    setShowAdd(false);
+    setSaving(false);
+  };
+
+  const handleDelete = async (id) => {
+    await supabase.from('contacts').delete().eq('id', id);
+    setContacts(c => c.filter(x => x.id !== id));
+  };
+
+  if (loading) return <div style={{ textAlign: "center", padding: 40, color: "#6B7280" }}>Loading...</div>;
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <div style={{ fontSize: 11, color: "#6B7280", fontWeight: 700, letterSpacing: ".1em", textTransform: "uppercase" }}>
+          {contacts.length} contact{contacts.length !== 1 ? 's' : ''}
+        </div>
+        <button onClick={() => setShowAdd(!showAdd)}
+          style={{ background: "#F59E0B", color: "#0A0F1E", border: "none", borderRadius: 8, padding: "8px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
+          + Add Contact
+        </button>
+      </div>
+
+      {showAdd && (
+        <div style={{ background: "#0D1B2A", borderRadius: 12, padding: 16, marginBottom: 16, border: "1px solid #1E2D3D" }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#F1F5F9", marginBottom: 14 }}>New Contact</div>
+          {[["Name *", "name", "text"], ["Role", "role", "text"], ["Phone", "phone", "tel"], ["Email", "email", "email"]].map(([label, key, type]) => (
+            <div key={key} style={{ marginBottom: 10 }}>
+              <label style={{ fontSize: 11, color: "#6B7280", fontWeight: 700, display: "block", marginBottom: 4 }}>{label}</label>
+              <input type={type} value={form[key]} onChange={e => f(key)(e.target.value)}
+                style={{ width: "100%", background: "#111827", border: "1px solid #1E2D3D", borderRadius: 8, padding: "9px 12px", color: "#F1F5F9", fontSize: 13, boxSizing: "border-box" }} />
+            </div>
+          ))}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 14 }}>
+            <button onClick={() => { setShowAdd(false); setForm({ name: '', role: '', phone: '', email: '' }); }}
+              style={{ background: "#1F2937", border: "none", borderRadius: 8, padding: 10, color: "#94A3B8", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Cancel</button>
+            <button onClick={handleAdd} disabled={saving}
+              style={{ background: "#10B981", border: "none", borderRadius: 8, padding: 10, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", opacity: saving ? 0.7 : 1 }}>
+              {saving ? "Saving..." : "Add"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {contacts.length === 0 && !showAdd && (
+        <div style={{ textAlign: "center", padding: "40px 0", color: "#4B5563" }}>No contacts yet.</div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {contacts.map(c => (
+          <div key={c.id} style={{ background: "#111827", border: "1px solid #1E2D3D", borderRadius: 12, padding: "14px 16px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "#F1F5F9", marginBottom: 2 }}>{c.name}</div>
+                {c.role && <div style={{ fontSize: 12, color: "#F59E0B", fontWeight: 600, marginBottom: 8 }}>{c.role}</div>}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {c.phone && (
+                    <a href={`tel:${c.phone}`}
+                      style={{ display: "flex", alignItems: "center", gap: 5, background: "#064E3B", color: "#6EE7B7", borderRadius: 7, padding: "5px 12px", fontSize: 12, fontWeight: 700, textDecoration: "none" }}>
+                      📞 {c.phone}
+                    </a>
+                  )}
+                  {c.email && (
+                    <a href={`mailto:${c.email}`}
+                      style={{ display: "flex", alignItems: "center", gap: 5, background: "#1E3A5F", color: "#93C5FD", borderRadius: 7, padding: "5px 12px", fontSize: 12, fontWeight: 700, textDecoration: "none" }}>
+                      ✉️ {c.email}
+                    </a>
+                  )}
+                </div>
+              </div>
+              <button onClick={() => handleDelete(c.id)}
+                style={{ background: "none", border: "none", color: "#4B5563", cursor: "pointer", fontSize: 16, padding: "0 0 0 12px" }}>✕</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FilesTab({ projectId }) {
+  const [files, setFiles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+
+  useEffect(() => {
+    supabase.from('files').select('*').eq('project_id', projectId)
+      .order('uploaded_at', { ascending: false })
+      .then(({ data }) => { setFiles(data || []); setLoading(false); });
+  }, [projectId]);
+
+  const handleUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setUploading(true);
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const path = `${projectId}/${Date.now()}-${safeName}`;
+    const { error: upErr } = await supabase.storage.from('files').upload(path, file, { contentType: file.type });
+    if (upErr) { alert('Upload failed: ' + upErr.message); setUploading(false); return; }
+    const { data } = await supabase.from('files').insert([{
+      project_id: projectId, name: file.name, storage_path: path,
+      file_type: file.type, size_bytes: file.size, visibility: 'everyone'
+    }]).select().single();
+    if (data) setFiles(f => [data, ...f]);
+    e.target.value = '';
+    setUploading(false);
+  };
+
+  const handleVisibility = async (fileId, visibility) => {
+    await supabase.from('files').update({ visibility }).eq('id', fileId);
+    setFiles(f => f.map(x => x.id === fileId ? { ...x, visibility } : x));
+  };
+
+  const handleDelete = async (file) => {
+    await supabase.storage.from('files').remove([file.storage_path]);
+    await supabase.from('files').delete().eq('id', file.id);
+    setFiles(f => f.filter(x => x.id !== file.id));
+  };
+
+  const getUrl = (path) => supabase.storage.from('files').getPublicUrl(path).data.publicUrl;
+
+  const fileIcon = (type) => {
+    if (!type) return '📎';
+    if (type.includes('pdf')) return '📄';
+    if (type.includes('image')) return '🖼️';
+    if (type.includes('spreadsheet') || type.includes('excel') || type.includes('csv')) return '📊';
+    if (type.includes('word') || type.includes('document')) return '📝';
+    return '📎';
+  };
+
+  const fmtSize = (bytes) => {
+    if (!bytes) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1048576) return `${(bytes/1024).toFixed(1)} KB`;
+    return `${(bytes/1048576).toFixed(1)} MB`;
+  };
+
+  const visibilityColor = { everyone: '#6B7280', admin_owner: '#F59E0B', owner_only: '#3B82F6' };
+
+  if (loading) return <div style={{ textAlign: "center", padding: 40, color: "#6B7280" }}>Loading...</div>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {files.map(file => (
+        <div key={file.id} style={{ background: "#111827", border: "1px solid #1E2D3D", borderRadius: 12, padding: "14px 16px" }}>
+          <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+            <div style={{ background: "#0D1B2A", borderRadius: 8, padding: "10px 12px", fontSize: 22, flexShrink: 0 }}>
+              {fileIcon(file.file_type)}
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, color: "#F1F5F9", fontWeight: 600, marginBottom: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.name}</div>
+              <div style={{ fontSize: 11, color: "#4B5563", marginBottom: 10 }}>
+                {fmtSize(file.size_bytes)} · {new Date(file.uploaded_at).toLocaleDateString()}
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <select value={file.visibility} onChange={e => handleVisibility(file.id, e.target.value)}
+                  style={{ background: "#0D1B2A", border: "1px solid #1E2D3D", borderRadius: 6, padding: "4px 8px", color: visibilityColor[file.visibility] || "#6B7280", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                  <option value="everyone">🌐 Everyone</option>
+                  <option value="admin_owner">🔒 Admin & Owner</option>
+                  <option value="owner_only">👁 Owner Only</option>
+                </select>
+                <a href={getUrl(file.storage_path)} target="_blank" rel="noreferrer"
+                  style={{ background: "#1F2937", color: "#94A3B8", borderRadius: 6, padding: "4px 12px", fontSize: 11, fontWeight: 700, textDecoration: "none" }}>
+                  ↓ Download
+                </a>
+                <button onClick={() => handleDelete(file)}
+                  style={{ background: "none", border: "none", color: "#4B5563", cursor: "pointer", fontSize: 12, padding: "4px 4px" }}>🗑</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ))}
+
+      {files.length === 0 && (
+        <div style={{ textAlign: "center", padding: "30px 0", color: "#4B5563" }}>No files uploaded yet.</div>
+      )}
+
+      <label style={{ display: "block", background: "none", border: "1px dashed #2D3F55", borderRadius: 8, padding: 14, textAlign: "center", cursor: uploading ? "default" : "pointer" }}>
+        <input type="file" style={{ display: "none" }} onChange={handleUpload} disabled={uploading} />
+        <span style={{ color: "#6B7280", fontSize: 13 }}>{uploading ? "Uploading..." : "+ Upload File"}</span>
+      </label>
+    </div>
+  );
+}
 
 function S_Review({ onClose, tr, lang }) {
   const [items, setItems] = useState([]);
